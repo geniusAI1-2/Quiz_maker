@@ -504,6 +504,10 @@ from fastapi.responses import FileResponse
 def download_python_file():
     return FileResponse("generated_plot.py", media_type="text/x-python", filename="plot.py")
 
+# if __name__ == "__main__":
+#     import uvicorn
+
+#     uvicorn.run(app, host="0.0.0.0", port=8000)
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))  # default only for local
+    uvicorn.run("quiz:app", host="0.0.0.0", port=port)
