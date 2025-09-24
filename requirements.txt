@@ -19,7 +19,7 @@ filelock==3.19.1
 filetype==1.2.0
 frozenlist==1.7.0
 fsspec==2025.9.0
-google-ai-generativelanguage==0.6.15  # CHANGED
+google-ai-generativelanguage==0.8.5 
 google-api-core==2.25.1
 google-api-python-client==2.183.0
 google-auth==2.40.3
@@ -60,8 +60,6 @@ orjson==3.11.3
 packaging==25.0
 pillow==11.3.0
 propcache==0.3.2
-proto-plus==1.26.1
-protobuf==6.32.1
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
 pydantic==2.11.9
