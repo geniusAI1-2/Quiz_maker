@@ -3,7 +3,6 @@ from pydantic import BaseModel
 import os
 import uuid
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 import re
 from groq import Groq
@@ -892,3 +891,4 @@ async def root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))  # default only for local
     uvicorn.run("quiz:app", host="0.0.0.0", port=port)
+
