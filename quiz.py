@@ -17,11 +17,11 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 import uvicorn
-from openai import OpenAI  # or other lib you're using for Whisper
+from openai import OpenAI  
 import tempfile
 from fastapi.responses import FileResponse
-from youtube_transcript_api import YouTubeTranscriptApi
-
+import subprocess
+from supadata import Supadata, SupadataError
 
 load_dotenv()
 
@@ -37,8 +37,9 @@ os.makedirs(BASE_FAISS_DIR, exist_ok=True)
 gemini_model = ChatGoogleGenerativeAI(
     model="gemini-2.0-flash",
     google_api_key=os.getenv("GOOGLE_API_KEY"),
-    temperature=0.7
+    temperature=0.5
 )
+supadata = Supadata(api_key=os.getenv("YOUTUBE_APIKEY"))
 
 # Initialize Groq S2T
 Groq_model = Groq(api_key=(os.getenv("GROQ_APIKEY")))
@@ -49,7 +50,7 @@ client = Groq(api_key=os.getenv("GROQ_APIKEY"))
 class GettingTheScript(BaseModel):
     input_link: str
     language: str
-
+    index_name: str
 class SummarizationRequest(BaseModel):
     input_text: str
 
@@ -94,7 +95,57 @@ class MakingScript(BaseModel):
 class Question(BaseModel):
     input_Q: str
 # Helper functions
-
+def get_youtube_transcript(url, lang='en'):
+    """
+    Get YouTube transcript using Supadata with automatic language fallback
+    """
+    if lang not in ['ar', 'en']:
+        lang = 'en'
+    
+    languages = ['ar', 'en'] if lang == 'ar' else ['en', 'ar']
+    
+    for language in languages:
+        try:
+            transcript = supadata.transcript(
+                url=url,
+                lang=language,
+                text=True,
+                mode="native"
+            )
+            if transcript:
+                # Convert to string if it's a Transcript object
+                if isinstance(transcript, str):
+                    return transcript
+                else:
+                    # It's a Transcript object, convert to string
+                    return str(transcript)
+        except SupadataError as e:
+            print(f"Supadata error for language {language}: {e}")
+            continue
+        except Exception as e:
+            print(f"General error for language {language}: {e}")
+            continue
+    
+    # If native mode fails, try auto mode as fallback
+    for language in languages:
+        try:
+            transcript = supadata.transcript(
+                url=url,
+                lang=language,
+                text=True,
+                mode="auto"
+            )
+            if transcript:
+                # Convert to string if it's a Transcript object
+                if isinstance(transcript, str):
+                    return transcript
+                else:
+                    return str(transcript)
+        except Exception as e:
+            print(f"Auto mode error for language {language}: {e}")
+            continue
+    
+    return None
 
 
 def extract_video_id(url):
@@ -197,51 +248,42 @@ def turn_S2T(file: UploadFile) -> str:
 
 # Endpoints
 @app.post("/quiz/getting_script")
-async def get_script(request: GettingYouTubeScript):
+async def get_script(request: GettingTheScript):
     youtube_url = request.input_link
     language = request.language
-    index_name = request.index_name
-
-    def get_youtube_text(url, lang):
-        try:
-            video_id = extract_video_id(url)
-            if not video_id:
-                raise ValueError("Could not extract video ID from URL")
-
-            try:
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
-            except:
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-
-            return " ".join([entry['text'] for entry in transcript])
-
-        except Exception as e:
-            print(f"Error getting YouTube transcript: {e}")
-            return None
-
-    text = get_youtube_text(youtube_url, language)
-    index_path = get_faiss_path(index_name)
-
-    if text:
-        metadata = {
-            "source": "youtube",
-            "url": youtube_url,
-            "language": language
-        }
-        add_text_to_vectorstore(text, metadata, index_path)
+    index_name = request.index_name  # FIXED: Added this line
+    
+    try:
+        video_id = extract_video_id(youtube_url)
+        if not video_id:
+            raise ValueError("Could not extract video ID from URL")
         
-        return {
-            "status": "success",
-            "video_url": youtube_url,
-            "language": language,
-            "transcript": text,
-            "index_path": index_path,
-            "message": "تمت إضافة النص إلى قاعدة البيانات"
-        }
-    else:
-        raise HTTPException(status_code=400, detail="فشل في الحصول على النص من رابط اليوتيوب.")
-
-
+        text = get_youtube_transcript(youtube_url, language)
+        
+        if text:
+            index_path = get_faiss_path(index_name)
+            metadata = {
+                "source": "youtube",
+                "url": youtube_url,
+                "language": language
+            }
+            add_text_to_vectorstore(text, metadata, index_path)
+            
+            return {
+                "status": "success",
+                "video_url": youtube_url,
+                "language": language,
+                "transcript": text[:500] + "..." if len(text) > 500 else text,
+                "index_path": index_path,
+                "message": "تمت إضافة النص إلى قاعدة البيانات"
+            }
+        else:
+            raise HTTPException(status_code=400, detail="فشل في الحصول على النص من رابط اليوتيوب.")
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error: {str(e)}"
+        )
 
 @app.post("/quiz/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...), index_name: str = Form(...)):
@@ -428,7 +470,7 @@ async def evaluation(request: EvaluateTheAnswers):
 
 
 
-@app.post("/quiz/voice_script")
+@app.post("/voice_script")
 async def voice_script_endpoint(
     file: UploadFile = File(...),
     index_name: str = Form(...)
@@ -481,6 +523,7 @@ Return only clean, plain text content.
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"حدث خطأ: {str(e)}")
+
 
 
 @app.post("/quiz/math&physics")
@@ -536,6 +579,7 @@ async def math_physics_endpoint(data: Question) -> Dict:
 @app.get("/quiz/download/plot.py")
 def download_python_file():
     return FileResponse("generated_plot.py", media_type="text/x-python", filename="plot.py")
+
 
 
 
@@ -891,4 +935,5 @@ async def root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))  # default only for local
     uvicorn.run("quiz:app", host="0.0.0.0", port=port)
+
 
