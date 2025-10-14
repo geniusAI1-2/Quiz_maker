@@ -94,4 +94,5 @@ uvicorn==0.35.0
 yarl==1.20.1
 youtube-transcript-api==1.1.0
 zstandard==0.25.0
+supadata==1.4.0
 
