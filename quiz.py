@@ -22,6 +22,7 @@ import tempfile
 from fastapi.responses import FileResponse
 import subprocess
 from supadata import Supadata, SupadataError
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
@@ -29,6 +30,23 @@ app = FastAPI()
 
 DEFAULT_FAISS_INDEX = "faiss_index"
 
+
+
+app = FastAPI()
+
+# ✅ CORS configuration
+origins = [
+    "http://82.112.253.252:8001",  # frontend URL
+    "http://127.0.0.1:8001"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,   # allow only these origins
+    allow_credentials=True,
+    allow_methods=["*"],     # allow GET, POST, PUT, DELETE, etc.
+    allow_headers=["*"],     # allow any headers
+)
 
 BASE_FAISS_DIR = "faiss_indexes" 
 os.makedirs(BASE_FAISS_DIR, exist_ok=True)
@@ -972,6 +990,7 @@ async def root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))  # default only for local
     uvicorn.run("quiz:app", host="0.0.0.0", port=port)
+
 
 
 
