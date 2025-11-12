@@ -658,26 +658,63 @@ prompt = ChatPromptTemplate.from_template("""
 """)
 
 
-#endpoints
+# #endpoints
+# @app.post("/chatpdf/upload_pdf")
+# async def upload_pdf(file: UploadFile = File(...), index_path: str = DEFAULT_FAISS_INDEX):
+#     try:
+#         # Save uploaded PDF 
+#         temp_pdf = "temp_uploaded.pdf"
+#         with open(temp_pdf, "wb") as f:
+#             f.write(await file.read())
+        
+#         # Process PDF 
+#         initialize_vectorstore(pdf_path=temp_pdf, index_path=index_path)
+#         os.remove(temp_pdf)  
+        
+#         return UploadResponse(
+#             message="تم معالجة الملف وحفظ الفهرس بنجاح",
+#             index_path=index_path
+#         )
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+from fastapi import UploadFile, File, HTTPException
+import os
+
+# Endpoint
 @app.post("/chatpdf/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...), index_path: str = DEFAULT_FAISS_INDEX):
+    # 1️⃣ Check file type
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
+
+    # 2️⃣ Make sure index_path folder exists
+    os.makedirs(index_path, exist_ok=True)
+
+    temp_pdf = "temp_uploaded.pdf"
     try:
-        # Save uploaded PDF 
-        temp_pdf = "temp_uploaded.pdf"
-        with open(temp_pdf, "wb") as f:
-            f.write(await file.read())
+        # 3️⃣ Save uploaded PDF
+        file_content = await file.read()
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
         
-        # Process PDF 
-        initialize_vectorstore(pdf_path=temp_pdf, index_path=index_path)
-        os.remove(temp_pdf)  
+        with open(temp_pdf, "wb") as f:
+            f.write(file_content)
+        
+        # 4️⃣ Process PDF safely
+        try:
+            initialize_vectorstore(pdf_path=temp_pdf, index_path=index_path)
+        except IndexError as ie:
+            raise HTTPException(status_code=500, detail=f"PDF processing error: {str(ie)}")
         
         return UploadResponse(
             message="تم معالجة الملف وحفظ الفهرس بنجاح",
             index_path=index_path
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+    
+    finally:
+        # 5️⃣ Remove temporary file safely
+        if os.path.exists(temp_pdf):
+            os.remove(temp_pdf)
 
 
 @app.post("/chatpdf/ask")
@@ -935,5 +972,6 @@ async def root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))  # default only for local
     uvicorn.run("quiz:app", host="0.0.0.0", port=port)
+
 
 
