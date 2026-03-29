@@ -10,84 +10,39 @@ from typing import Optional,Dict
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 import subprocess
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-import uvicorn
-from openai import OpenAI  
-import tempfile
-from fastapi.responses import FileResponse
-import subprocess
 from supadata import Supadata, SupadataError
-from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
 app = FastAPI()
-
-DEFAULT_FAISS_INDEX = "faiss_index"
-
-
-
-app = FastAPI()
-
-# ✅ CORS configuration
-origins = [
-    "http://82.112.253.252:8001",  # frontend URL
-    "http://127.0.0.1:8001"
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,   # allow only these origins
-    allow_credentials=True,
-    allow_methods=["*"],     # allow GET, POST, PUT, DELETE, etc.
-    allow_headers=["*"],     # allow any headers
-)
 
 BASE_FAISS_DIR = "faiss_indexes" 
 os.makedirs(BASE_FAISS_DIR, exist_ok=True)
 
 # Initialize Google Gemini
 gemini_model = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-2.5-flash",
     google_api_key=os.getenv("GOOGLE_API_KEY"),
     temperature=0.5
 )
-supadata = Supadata(api_key=os.getenv("YOUTUBE_APIKEY"))
 
 # Initialize Groq S2T
 Groq_model = Groq(api_key=(os.getenv("GROQ_APIKEY")))
+supadata = Supadata(api_key=os.getenv("YOUTUBE_APIKEY"))
 
-client = Groq(api_key=os.getenv("GROQ_APIKEY"))
-
-# request models
-class GettingTheScript(BaseModel):
-    input_link: str
-    language: str
-    index_name: str
-class SummarizationRequest(BaseModel):
-    input_text: str
-
-class MainPointsRequest(BaseModel):
-    input_text: str
-
-class ChatRequest(BaseModel):
-    input_text: str
-    question: str
 
 # Initialize embeddings
-hf_embeddings = HuggingFaceBgeEmbeddings(
+hf_embeddings = HuggingFaceEmbeddings(
     model_name="BAAI/bge-small-en",
     model_kwargs={"device": "cpu"},
     encode_kwargs={"normalize_embeddings": True}
 )
 
 # Request models
-class GettingYouTubeScript(BaseModel):
+class GettingTheScript(BaseModel):
     input_link: str
     language: str
     index_name: str
@@ -106,12 +61,14 @@ class EvaluateTheAnswers(BaseModel):
     questions: list[str]
     student_answers: list[str]
     correct_answers: list[str]
+    question_type: Optional[str] = None
 
 class MakingScript(BaseModel):
     index_name:str
 
 class Question(BaseModel):
     input_Q: str
+
 # Helper functions
 def get_youtube_transcript(url, lang='en'):
     """
@@ -164,7 +121,6 @@ def get_youtube_transcript(url, lang='en'):
             continue
     
     return None
-
 
 def extract_video_id(url):
     if 'youtu.be' in url:
@@ -246,7 +202,8 @@ def normalize_question_type(raw_type: str) -> str:
         return "general"
     
 def turn_S2T(file: UploadFile) -> str:
-
+    from openai import OpenAI
+    import tempfile
 
     try:
         client = OpenAI(api_key=os.getenv("GROQ_APIKEY"))
@@ -265,7 +222,7 @@ def turn_S2T(file: UploadFile) -> str:
 
 
 # Endpoints
-@app.post("/quiz/getting_script")
+@app.post("/getting_script")
 async def get_script(request: GettingTheScript):
     youtube_url = request.input_link
     language = request.language
@@ -303,7 +260,7 @@ async def get_script(request: GettingTheScript):
             detail=f"Error: {str(e)}"
         )
 
-@app.post("/quiz/upload_pdf")
+@app.post("/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...), index_name: str = Form(...)):
     try:
         temp_pdf = f"temp_{uuid.uuid4().hex}.pdf"
@@ -313,7 +270,7 @@ async def upload_pdf(file: UploadFile = File(...), index_name: str = Form(...)):
         loader = PyPDFLoader(temp_pdf)
         docs = loader.load()
         
-        index_path = get_faiss_path(index_name)  # استخدام الدالة الموحدة
+        index_path = get_faiss_path(index_name)  
         
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)
         splits = text_splitter.split_documents(docs)
@@ -330,7 +287,7 @@ async def upload_pdf(file: UploadFile = File(...), index_name: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/quiz/generate_questions")
+@app.post("/generate_questions")
 async def generate_questions(request: MakingQuestions):
     try:
         index_path = get_faiss_path(request.index_name)
@@ -346,7 +303,7 @@ async def generate_questions(request: MakingQuestions):
             )
         
         retriever = vs.as_retriever(search_kwargs={"k": 3})
-        relevant_docs = retriever.get_relevant_documents(request.subject)
+        relevant_docs = retriever.invoke(request.subject)
         context = "\n\n".join([doc.page_content for doc in relevant_docs])
         
         normalized_type = normalize_question_type(request.question_type)
@@ -422,15 +379,31 @@ You are a professional teacher and expert in educational assessment. Your task i
                 questions.append(q.strip())
                 answers.append(a.strip())
 
-        if len(questions) != request.num_questions:
-            raise HTTPException(
-                status_code=500,
-                detail=f"تم إنشاء {len(questions)} أسئلة فقط من {request.num_questions} المطلوبة"
-            )
+        # إضافة التفسيرات للإجابات
+        explanations = []
+        for question, answer in zip(questions, answers):
+            explanation_prompt = f"""
+اشرح بإيجاز لماذا الجواب "{answer}" هو الإجابة الصحيحة للسؤال: "{question}"
+الشرح يجب أن يكون واضحاً وقصيراً (جملة أو جملتان فقط)
+"""
+            explanation_response = gemini_model.invoke(explanation_prompt)
+            explanation = getattr(explanation_response, 'content', "").strip()
+            explanations.append(explanation)
+
+        # إنشاء النتيجة النهائية مع التفسيرات
+        detailed_questions = []
+        for i, (question, answer, explanation) in enumerate(zip(questions, answers, explanations)):
+            detailed_questions.append({
+                "question_number": i + 1,
+                "question": question,
+                "correct_answer": answer,
+                "explanation": explanation
+            })
 
         return {
             "questions": questions,
-            "answers": answers
+            "answers": answers,
+            "detailed_questions": detailed_questions
         }
 
     except Exception as e:
@@ -440,7 +413,7 @@ You are a professional teacher and expert in educational assessment. Your task i
         )
 
 
-@app.post("/quiz/evaluation")
+@app.post("/evaluation")
 async def evaluation(request: EvaluateTheAnswers):
     if not (len(request.questions) == len(request.student_answers) == len(request.correct_answers)):
         raise HTTPException(
@@ -451,13 +424,28 @@ async def evaluation(request: EvaluateTheAnswers):
     try:
         score = 0
         detailed_results = []
+        normalized_type = normalize_question_type(request.question_type) if request.question_type else "general"
         
         for i, (question, student_answer, correct_answer) in enumerate(zip(
             request.questions,
             request.student_answers,
             request.correct_answers
         )):
-            is_correct = student_answer.strip().lower() == correct_answer.strip().lower()
+            if normalized_type == "short_answer":
+                eval_prompt = f"""You are an educational evaluator. A student answered a short-answer question.
+
+Question: {question}
+Correct Answer: {correct_answer}
+Student Answer: {student_answer}
+
+Does the student's answer convey the same meaning or core idea as the correct answer? Minor wording differences are acceptable.
+Respond with only one word: True or False."""
+                eval_response = gemini_model.invoke(eval_prompt)
+                eval_text = getattr(eval_response, 'content', "").strip().lower()
+                is_correct = eval_text.startswith("true")
+            else:
+                is_correct = student_answer.strip().lower() == correct_answer.strip().lower()
+
             if is_correct:
                 score += 1
             
@@ -485,8 +473,6 @@ async def evaluation(request: EvaluateTheAnswers):
             status_code=500,
             detail=f"حدث خطأ أثناء التقييم: {str(e)}"
         )
-
-
 
 @app.post("/voice_script")
 async def voice_script_endpoint(
@@ -543,8 +529,7 @@ Return only clean, plain text content.
         raise HTTPException(status_code=500, detail=f"حدث خطأ: {str(e)}")
 
 
-
-@app.post("/quiz/math&physics")
+@app.post("/math&physics")
 async def math_physics_endpoint(data: Question) -> Dict:
     prompt = f"""
 أنت مساعد ذكي لحل مسائل الرياضيات والفيزياء.
@@ -561,7 +546,6 @@ async def math_physics_endpoint(data: Question) -> Dict:
 الرجاء إرجاع الرد بهذا الشكل:
 
 <شرح_الحل>
-
 ```python
 <كود_Python_لرسم_الشكل>
 """
@@ -585,412 +569,36 @@ async def math_physics_endpoint(data: Question) -> Dict:
     except subprocess.CalledProcessError:
         image_generated = False
 
+    # إضافة تفسير إضافي لماذا تم اختيار هذا الحل
+    reasoning_prompt = f"""
+قدم شرحاً مختصراً (جملة أو جملتان) عن الخطوات الرئيسية المستخدمة في حل هذا السؤال:
+{data.input_Q}
+
+ركز على المنطق الرياضي/الفيزيائي وراء الحل.
+"""
+    reasoning_response = gemini_model.invoke(reasoning_prompt)
+    reasoning = getattr(reasoning_response, 'content', "").strip()
+
     return {
+        "question": data.input_Q,
         "solution": explanation.strip(),
+        "solution_explanation": reasoning,
         "drawing_code": code.strip(),
         "python_file": script_path,
-        "image_generated": image_generated
+        "image_generated": image_generated,
+        "complete_output": {
+            "question": data.input_Q,
+            "answer": explanation.strip(),
+            "explanation": reasoning
+        }
     }
 
+from fastapi.responses import FileResponse
 
-
-@app.get("/quiz/download/plot.py")
+@app.get("/download/plot.py")
 def download_python_file():
     return FileResponse("generated_plot.py", media_type="text/x-python", filename="plot.py")
 
-
-
-
-
-#==================================================================================================================================================================
-#==================================================================================================================================================================
-#==================================================================================================================================================================
-#==================================================================================================================================================================
-
-
-
-# Request Models
-class QuestionRequest(BaseModel):
-    question: str
-    prev_question: str = ""
-    use_existing_index: bool = True 
-
-class UploadResponse(BaseModel):
-    message: str
-    index_path: str
-
-# Initialize embeddings
-hf_embeddings = HuggingFaceBgeEmbeddings(
-    model_name="BAAI/bge-small-en",
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"normalize_embeddings": True}
-)
-
-# Global vectorstore instance
-vectorstore = None
-
-def clean_response(text):
-    return re.sub(r"[ﭼ-ﯿ]+", "", text)
-
-def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
-
-def initialize_vectorstore(pdf_path: Optional[str] = None, index_path: str = DEFAULT_FAISS_INDEX):
-    global vectorstore
-    
-    if os.path.exists(index_path) and pdf_path is None:
-        print("Loading existing FAISS index...")
-        vectorstore = FAISS.load_local(index_path, hf_embeddings, allow_dangerous_deserialization=True)
-    elif pdf_path:
-        print("Processing new PDF...")
-        loader = PyPDFLoader(pdf_path)
-        docs = loader.load()
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=300)
-        splits = text_splitter.split_documents(docs)
-        vectorstore = FAISS.from_documents(splits, hf_embeddings)
-        vectorstore.save_local(index_path)
-        print(f"Saved new index to {index_path}")
-    else:
-        raise HTTPException(status_code=400, detail="Neither PDF nor existing index provided")
-    
-    return vectorstore
-
-#LLM
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
-    temperature=0,
-    google_api_key=os.getenv("GOOGLE_API_KEY")
-)
-
-prompt = ChatPromptTemplate.from_template("""
-أنت مساعد ذكي يساعد الطلاب في جميع المواد الدراسية. إذا كان السؤال يحتوي على معادلات أو مسائل رياضية أو علمية، قم بحلها بدقة حتى لو لم تكن موجودة في النص. 
-ركّز على الفهم والتحليل، ولا تعتمد فقط على السياق النصي.
-
-السياق:
-{context}
-
-السؤال السابق: {prev_question}
-السؤال الحالي: {question}
-
-الإجابة:
-""")
-
-
-# #endpoints
-# @app.post("/chatpdf/upload_pdf")
-# async def upload_pdf(file: UploadFile = File(...), index_path: str = DEFAULT_FAISS_INDEX):
-#     try:
-#         # Save uploaded PDF 
-#         temp_pdf = "temp_uploaded.pdf"
-#         with open(temp_pdf, "wb") as f:
-#             f.write(await file.read())
-        
-#         # Process PDF 
-#         initialize_vectorstore(pdf_path=temp_pdf, index_path=index_path)
-#         os.remove(temp_pdf)  
-        
-#         return UploadResponse(
-#             message="تم معالجة الملف وحفظ الفهرس بنجاح",
-#             index_path=index_path
-#         )
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
-from fastapi import UploadFile, File, HTTPException
-import os
-
-# Endpoint
-@app.post("/chatpdf/upload_pdf")
-async def upload_pdf(file: UploadFile = File(...), index_path: str = DEFAULT_FAISS_INDEX):
-    # 1️⃣ Check file type
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
-
-    # 2️⃣ Make sure index_path folder exists
-    os.makedirs(index_path, exist_ok=True)
-
-    temp_pdf = "temp_uploaded.pdf"
-    try:
-        # 3️⃣ Save uploaded PDF
-        file_content = await file.read()
-        if len(file_content) == 0:
-            raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
-        
-        with open(temp_pdf, "wb") as f:
-            f.write(file_content)
-        
-        # 4️⃣ Process PDF safely
-        try:
-            initialize_vectorstore(pdf_path=temp_pdf, index_path=index_path)
-        except IndexError as ie:
-            raise HTTPException(status_code=500, detail=f"PDF processing error: {str(ie)}")
-        
-        return UploadResponse(
-            message="تم معالجة الملف وحفظ الفهرس بنجاح",
-            index_path=index_path
-        )
-    
-    finally:
-        # 5️⃣ Remove temporary file safely
-        if os.path.exists(temp_pdf):
-            os.remove(temp_pdf)
-
-
-@app.post("/chatpdf/ask")
-async def ask_question(request: QuestionRequest, index_path: str = DEFAULT_FAISS_INDEX):
-    global vectorstore
-    
-    try:
-        if vectorstore is None:
-            initialize_vectorstore(index_path=index_path)
-        
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 40})
-        
-        chain = (
-            {
-                "context": retriever | format_docs,
-                "prev_question": lambda x: request.prev_question,
-                "question": RunnablePassthrough()
-            }
-            | prompt
-            | llm
-            | StrOutputParser()
-        )
-        
-        response = chain.invoke(request.question)
-        return {"answer": clean_response(response)}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/chatpdf/status")
-async def check_status(index_path: str = DEFAULT_FAISS_INDEX):
-    index_exists = os.path.exists(index_path)
-    return {
-        "index_exists": index_exists,
-        "index_path": index_path,
-        "ready_for_queries": index_exists or (vectorstore is not None)
-    }
-
-
-
-#====================================================================================
-#====================================================================================
-#====================================================================================
-#====================================================================================
-#====================================================================================
-#====================================================================================
-#====================================================================================
-#====================================================================================
-
-# Endpoint for getting YouTube transcript
-@app.post("/studying_project/getting_script")
-async def get_script(request: GettingTheScript):
-    youtube_url = request.input_link
-    language = request.language
-    
-    def extract_video_id(url):
-        if 'youtu.be' in url:
-            return url.split('/')[-1].split('?')[0]
-        query = urlparse(url).query
-        params = parse_qs(query)
-        return params.get('v', [None])[0]
-
-    def get_youtube_text(url, lang):
-        try:
-            video_id = extract_video_id(url)
-            if not video_id:
-                raise ValueError("Could not extract video ID from URL")
-                
-            # Try to get transcript in requested language
-            try:
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
-            except:
-                print(f"No {lang} transcript available, trying English...")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-                
-            return " ".join([entry['text'] for entry in transcript])
-        
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            return None
-
-    text = get_youtube_text(youtube_url, language)
-
-    if text:
-        return {
-            "status": "success",
-            "video_url": youtube_url,
-            "language": language,
-            "transcript": text
-        }
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "status": "error",
-                "message": "Failed to get transcript",
-                "possible_reasons": [
-                    "Video has no captions",
-                    "Language not available",
-                    "Invalid YouTube URL"
-                ]
-            }
-        )
-# Endpoint for summarization
-
-@app.post("/studying_project/summarize")
-async def summarize(request: SummarizationRequest):
-    input_text = request.input_text
-
-    prompt = f"""
-You are a professional summarization assistant. Your task is to summarize the following text in a clear, concise, and organized manner. Follow these rules:
-1. The summary must be in the same language as the input text.
-2. Do not add any information that is not in the original text.
-3. Ensure the summary is comprehensive and captures all key points.
-
-Examples:
-
-Input (English):
-Solar energy is one of the most important renewable energy sources. It is converted into electricity using solar panels, which absorb sunlight and convert it into electrical energy. Solar energy is used in many applications, such as generating electricity for homes and businesses, and powering small electronic devices.
-
-Summary (English):
-Solar energy is a key renewable energy source. It is converted into electricity via solar panels that absorb sunlight. It is used in various applications, including powering homes, businesses, and small electronic devices.
-
-Input (Arabic):
-تعتبر الطاقة الشمسية واحدة من أهم مصادر الطاقة المتجددة. يتم تحويل الطاقة الشمسية إلى كهرباء باستخدام الألواح الشمسية، والتي تعمل على امتصاص أشعة الشمس وتحويلها إلى طاقة كهربائية. تستخدم الطاقة الشمسية في العديد من التطبيقات مثل توليد الكهرباء للمنازل والشركات، وتشغيل الأجهزة الإلكترونية الصغيرة.
-
-Summary (Arabic):
-الطاقة الشمسية هي مصدر مهم للطاقة المتجددة. يتم تحويلها إلى كهرباء عبر الألواح الشمسية التي تمتص أشعة الشمس. تُستخدم في تطبيقات متنوعة مثل توليد الكهرباء للمنازل والشركات وتشغيل الأجهزة الإلكترونية الصغيرة.
-
-Now, summarize the following text. Ensure the summary is in the same language as the input text and follows the rules above.
-
-Input:
-{input_text}
-
-Summary:
-"""
-
-    try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-            stream=False,
-        )
-        summary = chat_completion.choices[0].message.content
-        return {"summary": summary}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Endpoint for extracting main points
-@app.post("/studying_project/extract_main_points")
-async def extract_main_points(request: MainPointsRequest):
-    input_text = request.input_text
-    prompt = f"""
-    You are a professional assistant. Your task is to extract the main points from the following text and list them in a clear, numbered format (1, 2, 3, ...). Follow these rules:
-    1. The main points must be in the same language as the input text.
-    2. Do not add any information that is not in the original text.
-    3. Ensure the points are concise and cover all key aspects of the text.
-
-    Examples:
-
-    Input (English):
-    Solar energy is one of the most important renewable energy sources. It is converted into electricity using solar panels, which absorb sunlight and convert it into electrical energy. Solar energy is used in many applications, such as generating electricity for homes and businesses, and powering small electronic devices.
-
-    Main Points (English):
-    1. Solar energy is a key renewable energy source.
-    2. It is converted into electricity via solar panels.
-    3. It is used in various applications, including powering homes, businesses, and small electronic devices.
-
-    Input (Arabic):
-    تعتبر الطاقة الشمسية واحدة من أهم مصادر الطاقة المتجددة. يتم تحويل الطاقة الشمسية إلى كهرباء باستخدام الألواح الشمسية، والتي تعمل على امتصاص أشعة الشمس وتحويلها إلى طاقة كهربائية. تستخدم الطاقة الشمسية في العديد من التطبيقات مثل توليد الكهرباء للمنازل والشركات، وتشغيل الأجهزة الإلكترونية الصغيرة.
-
-    Main Points (Arabic):
-    1. الطاقة الشمسية هي مصدر مهم للطاقة المتجددة.
-    2. يتم تحويلها إلى كهرباء عبر الألواح الشمسية.
-    3. تُستخدم في تطبيقات متنوعة مثل توليد الكهرباء للمنازل والشركات.
-
-    Now, extract the main points from the following text. Ensure the points are in the same language as the input text and follow the rules above.
-
-    Input:
-    {input_text}
-
-    Main Points:
-    """
-
-    try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-            stream=False,
-        )
-        main_points = chat_completion.choices[0].message.content
-        return {"main_points": main_points}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Endpoint for chat with the user
-@app.post("/studying_project/chat")
-async def chat(request: ChatRequest):
-    input_text = request.input_text
-    question = request.question
-
-    prompt = f"""
-    You are a knowledgeable and adaptive assistant. Your task is to answer the user's questions based on the following text. Follow these rules strictly:
-    1. **Language Matching**: Respond in the same language as the question. If the question is in Arabic, respond in Arabic. If the question is in English, respond in English.
-    2. **Contextual Awareness**: 
-       - If the question is related to the provided text, answer it based on the text.
-       - If the question is unrelated to the text, respond politely with:
-         - "عذرًا، لا يمكنني الإجابة على هذا السؤال لأنه ليس في نفس سياق النص المقدم." (if the question is in Arabic).
-         - "Sorry, I cannot answer this question as it is not within the context of the provided text." (if the question is in English).
-    3. **Flexibility**: If the question is vague or ambiguous, ask for clarification or provide a general response based on the text.
-    4. **Accuracy**: Do not add any information that is not in the original text. Your answer must be based solely on the provided text.
-
-    Text:
-    {input_text}
-    Question:
-    {question}
-    Answer:
-    """
-
-    try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-            stream=False,
-        )
-        answer = chat_completion.choices[0].message.content
-        return {"answer": answer}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-# Root endpoint
-
-@app.get("/studying_project/status")
-async def root():
-    return {"message": "Welcome to FastAPI "}
-
-
-
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))  # default only for local
-    uvicorn.run("quiz:app", host="0.0.0.0", port=port)
-
-
-
-
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
